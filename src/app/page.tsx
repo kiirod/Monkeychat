@@ -173,7 +173,6 @@ function NewChatModal({
   }, [query, currentUser.id]);
 
   async function startConversation(other: Profile) {
-    // Check if conversation already exists
     const { data: existing } = await supabase
       .from("conversations")
       .select("*")
@@ -284,8 +283,8 @@ function ChatView({
         filter: `conversation_id=eq.${conversation.id}`,
       }, (payload) => {
         const msg = payload.new as Message;
+        // Dedup: ignore if we already have this message (optimistic insert)
         setMessages((prev) => prev.find((m) => m.id === msg.id) ? prev : [...prev, msg]);
-        // Mark as read if it's from the other person
         if (msg.sender_id !== currentUser.id) {
           supabase.from("messages").update({ read: true }).eq("id", msg.id);
         }
@@ -353,7 +352,9 @@ function ChatView({
     }).select().single();
 
     if (msg) {
-      // Update conversation last message
+      // ✅ FIX: Optimistically add to local state immediately — don't wait for realtime
+      setMessages((prev) => prev.find((m) => m.id === msg.id) ? prev : [...prev, msg as Message]);
+
       await supabase.from("conversations").update({
         last_message: text.trim() || "📷 Image",
         last_message_at: new Date().toISOString(),
@@ -368,6 +369,10 @@ function ChatView({
   }
 
   async function deleteMessage(msgId: string) {
+    // ✅ FIX: Optimistically update local state immediately — don't wait for realtime
+    setMessages((prev) =>
+      prev.map((m) => m.id === msgId ? { ...m, deleted: true, content: "" } : m)
+    );
     await supabase.from("messages").update({ deleted: true, content: "" }).eq("id", msgId);
   }
 
@@ -438,7 +443,6 @@ function ChatView({
               return (
                 <div key={msg.id}
                   style={{ display: "flex", gap: 8, alignItems: "flex-end", justifyContent: isMe ? "flex-end" : "flex-start", marginBottom: sameAsPrev ? 2 : 8 }}>
-                  {/* Other user avatar — only on first message in a run */}
                   {!isMe && (
                     <div style={{ width: 28, flexShrink: 0 }}>
                       {showAvatar && <Avatar url={other.pfp_url} username={other.username} size={28} />}
@@ -481,7 +485,6 @@ function ChatView({
                         </>
                       )}
 
-                      {/* Delete button on hover (own messages only) */}
                       {isMe && !msg.deleted && (
                         <button
                           onClick={() => deleteMessage(msg.id)}
@@ -611,7 +614,7 @@ function ChatApp() {
     loadConversations();
   }, [currentUser]);
 
-  // Auto-open DM from ?dm=handle query param (set by /[username] redirect)
+  // Auto-open DM from ?dm=handle query param
   const searchParams = useSearchParams();
   useEffect(() => {
     const dmHandle = searchParams.get("dm");
@@ -643,7 +646,6 @@ function ChatApp() {
         if (newConv) setActiveConv({ ...newConv, other_user: other as Profile, unread_count: 0 });
       }
 
-      // Clear the query param from the URL without re-navigating
       window.history.replaceState({}, "", "/");
     }
 
@@ -661,7 +663,6 @@ function ChatApp() {
 
     if (!data) return;
 
-    // Fetch other user profiles
     const enriched = await Promise.all(data.map(async (conv) => {
       const otherId = conv.participant_a === currentUser.id ? conv.participant_b : conv.participant_a;
       const { data: otherProfile } = await supabase
@@ -670,7 +671,6 @@ function ChatApp() {
         .eq("id", otherId)
         .single();
 
-      // Count unread
       const { count } = await supabase
         .from("messages")
         .select("*", { count: "exact", head: true })
